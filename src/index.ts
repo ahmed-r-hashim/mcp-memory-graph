@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { StreamableHTTPServerTransport } from './transport/StreamableHTTPServerTransport.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express from 'express';
 import { randomUUID } from 'crypto';
 import {
   CallToolRequestSchema,
   ErrorCode,
+  isInitializeRequest,
   ListResourcesRequestSchema,
   ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
@@ -32,14 +33,18 @@ interface MemoryGraphServerConfig {
 }
 
 class MemoryGraphServer {
-  private server: Server;
   private memoryGraph: MemoryGraph;
   private memoryTools: MemoryTools;
   private memoryResources: MemoryResources;
   private config: MemoryGraphServerConfig;
+  private stdioServer?: Server;
+  private httpSessions: Map<string, { server: Server; transport: StreamableHTTPServerTransport }>;
+  private httpDebugEnabled: boolean;
 
   constructor(config: MemoryGraphServerConfig = {}) {
     this.config = config;
+    this.httpSessions = new Map();
+    this.httpDebugEnabled = process.env.MCP_HTTP_DEBUG === 'true';
     
     // Initialize memory graph
     const storageDir = process.env.MEMORY_DIR || path.join(__dirname, '../data');
@@ -74,8 +79,23 @@ class MemoryGraphServer {
     this.memoryTools = new MemoryTools(this.memoryGraph);
     this.memoryResources = new MemoryResources(this.memoryGraph);
 
-    // Initialize MCP server
-    this.server = new Server(
+    process.on('SIGINT', async () => {
+      await this.close();
+      process.exit(0);
+    });
+  }
+
+  private logHttpDebug(message: string, details?: Record<string, unknown>) {
+    if (!this.httpDebugEnabled) {
+      return;
+    }
+
+    const suffix = details ? ` ${JSON.stringify(details)}` : '';
+    console.error(`[MCP HTTP DEBUG] ${message}${suffix}`);
+  }
+
+  private createServer() {
+    const server = new Server(
       {
         name: 'memory-graph',
         version: '0.1.0',
@@ -83,22 +103,18 @@ class MemoryGraphServer {
       {
         capabilities: {
           tools: {},
-          resources: {}, // Add resources capability
+          resources: {},
         },
       }
     );
 
-    this.setupHandlers();
-  }
-
-  private setupHandlers() {
     // List available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: Object.values(MEMORY_TOOLS),
     }));
 
     // Handle tool calls
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         const toolRequest: ToolRequest = {
           name: request.params.name as ToolName,
@@ -119,7 +135,7 @@ class MemoryGraphServer {
     });
 
     // List available resources
-    this.server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+    server.setRequestHandler(ListResourcesRequestSchema, async () => ({
       resources: [
         {
           uri: 'memory://domains/statistics',
@@ -149,12 +165,12 @@ class MemoryGraphServer {
     }));
 
     // List resource templates
-    this.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
       resourceTemplates: [],
     }));
 
     // Read resource contents
-    this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       try {
         const uri = request.params.uri;
         let content: string;
@@ -199,15 +215,25 @@ class MemoryGraphServer {
     });
 
     // Error handling
-    this.server.onerror = (error) => {
+    server.onerror = (error) => {
       console.error('[MCP Error]', error);
     };
 
-    // Cleanup on exit
-    process.on('SIGINT', async () => {
-      await this.server.close();
-      process.exit(0);
-    });
+    return server;
+  }
+
+  private async close() {
+    if (this.stdioServer) {
+      await this.stdioServer.close();
+      this.stdioServer = undefined;
+    }
+
+    for (const [sessionId, session] of this.httpSessions) {
+      this.logHttpDebug('Closing HTTP session during shutdown', { sessionId });
+      await session.transport.close();
+      await session.server.close();
+    }
+    this.httpSessions.clear();
   }
 
   private async startHttpTransport() {
@@ -220,14 +246,56 @@ class MemoryGraphServer {
     const app = express();
     app.use(express.json());
 
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      eventStore: new Map(),
-    });
-
-    app.all('/mcp', async (req, res) => {
+    app.post('/mcp', async (req, res) => {
       try {
-        await transport.handleRequest(req, res, req.body);
+        const sessionIdHeader = req.headers['mcp-session-id'];
+        const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
+        let session = sessionId ? this.httpSessions.get(sessionId) : undefined;
+
+        if (session) {
+          this.logHttpDebug('Routing POST to existing HTTP session', {
+            sessionId,
+            method: (req.body as { method?: string } | undefined)?.method ?? null,
+          });
+          await session.transport.handleRequest(req, res, req.body);
+          return;
+        }
+
+        if (!sessionId && isInitializeRequest(req.body)) {
+          const server = this.createServer();
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (newSessionId) => {
+              this.httpSessions.set(newSessionId, { server, transport });
+              this.logHttpDebug('Registered new HTTP session', {
+                sessionId: newSessionId,
+                activeSessions: this.httpSessions.size,
+              });
+            },
+            onsessionclosed: (closedSessionId) => {
+              this.httpSessions.delete(closedSessionId);
+              this.logHttpDebug('Session closed by client', {
+                sessionId: closedSessionId,
+                activeSessions: this.httpSessions.size,
+              });
+            },
+          });
+
+          await server.connect(transport);
+          await transport.handleRequest(req, res, req.body);
+          return;
+        }
+
+        this.logHttpDebug('Rejected POST without a valid HTTP session', {
+          sessionId: sessionId ?? null,
+          method: (req.body as { method?: string } | undefined)?.method ?? null,
+        });
+
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'Bad Request: No valid session ID provided' },
+          id: null,
+        });
       } catch (error) {
         console.error('Error handling MCP request:', error);
         if (!res.headersSent) {
@@ -240,7 +308,66 @@ class MemoryGraphServer {
       }
     });
 
-    await this.server.connect(transport);
+    app.get('/mcp', async (req, res) => {
+      const sessionIdHeader = req.headers['mcp-session-id'];
+      const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
+
+      if (!sessionId) {
+        res.status(400).send('Invalid or missing session ID');
+        return;
+      }
+
+      const session = this.httpSessions.get(sessionId);
+      if (!session) {
+        res.status(404).send('Session not found');
+        return;
+      }
+
+      this.logHttpDebug('Routing GET to existing HTTP session', {
+        sessionId,
+        lastEventId: req.headers['last-event-id'] ?? null,
+      });
+
+      try {
+        await session.transport.handleRequest(req, res);
+      } catch (error) {
+        console.error('Error handling MCP SSE request:', error);
+        if (!res.headersSent) {
+          res.status(500).send('Internal server error');
+        }
+      }
+    });
+
+    app.delete('/mcp', async (req, res) => {
+      const sessionIdHeader = req.headers['mcp-session-id'];
+      const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
+
+      if (!sessionId) {
+        res.status(400).send('Invalid or missing session ID');
+        return;
+      }
+
+      const session = this.httpSessions.get(sessionId);
+      if (!session) {
+        res.status(404).send('Session not found');
+        return;
+      }
+
+      this.logHttpDebug('Routing DELETE to existing HTTP session', {
+        sessionId,
+      });
+
+      try {
+        await session.transport.handleRequest(req, res);
+        await session.server.close();
+        this.httpSessions.delete(sessionId);
+      } catch (error) {
+        console.error('Error handling MCP session termination:', error);
+        if (!res.headersSent) {
+          res.status(500).send('Internal server error');
+        }
+      }
+    });
 
     const server = app.listen(port, host, () => {
       console.error(`Memory Graph MCP server running on http://${host}:${port}/mcp`);
@@ -257,8 +384,10 @@ class MemoryGraphServer {
   }
 
   private async startStdioTransport() {
+    const server = this.createServer();
     const transport = new StdioServerTransport();
-    await this.server.connect(transport);
+    await server.connect(transport);
+    this.stdioServer = server;
     console.error('Memory Graph MCP server running on stdio');
   }
 

@@ -159,6 +159,8 @@ The server can be configured using environment variables:
 - `TRANSPORT_TYPE`: Communication transport to use (`STDIO` or `HTTP`, default: `STDIO`)
 - `PORT`: Port number for HTTP transport (required when `TRANSPORT_TYPE=HTTP`)
 - `HOST`: Host address for HTTP transport (default: `127.0.0.1`, only used when `TRANSPORT_TYPE=HTTP`)
+- `MCP_HTTP_DEBUG`: Set to `true` to emit request/session debug logs for the HTTP transport to stderr
+- `MCP_HTTP_TIMEOUT_WARNING_MS`: Warn when an HTTP JSON-RPC request has been left waiting longer than this many milliseconds (default: `10000`)
 
 ## MCP Configuration
 

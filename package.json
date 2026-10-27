@@ -5,7 +5,7 @@
   "main": "build/index.js",
   "type": "module",
   "scripts": {
-    "build": "tsc && chmod +x build/index.js",
+    "build": "tsc",
     "start": "node build/index.js",
     "dev": "ts-node --esm src/index.ts",
     "test": "jest",
@@ -21,11 +21,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.11.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "express": "^5.1.0",
     "mysql2": "^3.9.1",
     "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.7",
+    "sqlite3": "^6.0.1",
     "typescript": "^5.0.0"
   },
   "devDependencies": {

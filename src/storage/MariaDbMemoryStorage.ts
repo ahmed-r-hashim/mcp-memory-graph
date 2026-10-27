@@ -195,7 +195,7 @@ export class MariaDbMemoryStorage extends DatabaseStorage {
     // Check if function exists
     const [rows] = await conn.execute(
       'SELECT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_NAME = ?',
-      [this.config.database, 'get_node_tags']
+      [this.config.database as string, 'get_node_tags']
     );
     
     // If function doesn't exist, create it
