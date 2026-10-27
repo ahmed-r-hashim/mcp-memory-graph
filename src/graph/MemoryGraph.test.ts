@@ -259,6 +259,8 @@ describe('MemoryGraph', () => {
       const dbFile = path.join(testStoragePath, 'memory-graph.db');
       const dbExists = await fs.access(dbFile).then(() => true).catch(() => false);
       expect(dbExists).toBe(true);
+
+      await (graph as any).storage.close();
     });
 
     it('should load existing domain memory data from SQLite storage', async () => {
@@ -285,6 +287,9 @@ describe('MemoryGraph', () => {
       const results = await graph.recallMemories({ maxNodes: 10, strategy: 'recent' });
       expect(results).toHaveLength(1);
       expect(results[0].node.content).toBe('test1');
+
+      await (initialGraph as any).storage.close();
+      await (graph as any).storage.close();
     });
   });
 

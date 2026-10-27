@@ -14,4 +14,22 @@ export default {
       },
     ],
   },
+  collectCoverageFrom: [
+    'src/**/*.ts',
+    '!src/**/*.test.ts',
+    '!src/**/*.d.ts',
+    // Process entry point (uses import.meta) and CLI script are not unit-testable under ts-jest CJS
+    '!src/index.ts',
+    '!src/scripts/**',
+  ],
+  coverageDirectory: 'coverage',
+  coverageReporters: ['text', 'lcov'],
+  coverageThreshold: {
+    global: {
+      statements: 90,
+      branches: 90,
+      functions: 90,
+      lines: 90,
+    },
+  },
 };

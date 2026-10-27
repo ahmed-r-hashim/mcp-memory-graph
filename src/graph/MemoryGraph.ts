@@ -566,7 +566,7 @@ export class MemoryGraph {
 
     const results: RecallResult[] = [];
     const regex = input.search.regex 
-      ? new RegExp(input.search.regex, input.search.caseSensitive ? '' : 'i')
+      ? new RegExp(input.search.regex, input.search.caseSensitive ? 'g' : 'gi')
       : null;
 
     for (const node of candidates) {

@@ -35,6 +35,16 @@ export class SqliteMemoryStorage extends DatabaseStorage {
   }
 
   /**
+   * Close the database connection
+   */
+  async close(): Promise<void> {
+    if (this.db) {
+      await this.db.close();
+      this.db = null;
+    }
+  }
+
+  /**
    * Initialize the storage
    * Creates necessary tables, indexes, and triggers
    */
